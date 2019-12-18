@@ -4,6 +4,16 @@ const isSandstorm =
   Meteor.settings && Meteor.settings.public && Meteor.settings.public.sandstorm;
 Users = Meteor.users;
 
+const allowedSortValues = [
+  '-modifiedAt',
+  'modifiedAt',
+  '-title',
+  'title',
+  '-sort',
+  'sort',
+];
+const defaultSortBy = allowedSortValues[0];
+
 /**
  * A User in wekan
  */
@@ -54,6 +64,8 @@ Users.attachSchema(
       autoValue() {
         if (this.isInsert) {
           return new Date();
+        } else if (this.isUpsert) {
+          return { $setOnInsert: new Date() };
         } else {
           this.unset();
         }
@@ -105,6 +117,13 @@ Users.attachSchema(
        * full name of the user
        */
       type: String,
+      optional: true,
+    },
+    'profile.showDesktopDragHandles': {
+      /**
+       * does the user want to hide system messages?
+       */
+      type: Boolean,
       optional: true,
     },
     'profile.hiddenSystemMessages': {
@@ -182,6 +201,15 @@ Users.attachSchema(
         'board-view-cal',
       ],
     },
+    'profile.listSortBy': {
+      /**
+       * default sort list for user
+       */
+      type: String,
+      optional: true,
+      defaultValue: defaultSortBy,
+      allowedValues: allowedSortValues,
+    },
     'profile.templatesBoardId': {
       /**
        * Reference to the templates board
@@ -258,9 +286,14 @@ Users.attachSchema(
 );
 
 Users.allow({
-  update(userId) {
-    const user = Users.findOne(userId);
-    return user; // && Meteor.user().isAdmin; // GitHub issue #2590
+  update(userId, doc) {
+    const user = Users.findOne({ _id: userId });
+    if ((user && user.isAdmin) || (Meteor.user() && Meteor.user().isAdmin))
+      return true;
+    if (!user) {
+      return false;
+    }
+    return doc._id === userId;
   },
   remove(userId, doc) {
     const adminsNumber = Users.find({ isAdmin: true }).count();
@@ -351,6 +384,31 @@ Users.helpers({
     return _.contains(invitedBoards, boardId);
   },
 
+  _getListSortBy() {
+    const profile = this.profile || {};
+    const sortBy = profile.listSortBy || defaultSortBy;
+    const keyPattern = /^(-{0,1})(.*$)/;
+    const ret = [];
+    if (keyPattern.exec(sortBy)) {
+      ret[0] = RegExp.$2;
+      ret[1] = RegExp.$1 ? -1 : 1;
+    }
+    return ret;
+  },
+  hasSortBy() {
+    // if use doesn't have dragHandle, then we can let user to choose sort list by different order
+    return !this.hasShowDesktopDragHandles();
+  },
+  getListSortBy() {
+    return this._getListSortBy()[0];
+  },
+  getListSortTypes() {
+    return allowedSortValues;
+  },
+  getListSortByDirection() {
+    return this._getListSortBy()[1];
+  },
+
   hasTag(tag) {
     const { tags = [] } = this.profile || {};
     return _.contains(tags, tag);
@@ -359,6 +417,11 @@ Users.helpers({
   hasNotification(activityId) {
     const { notifications = [] } = this.profile || {};
     return _.contains(notifications, activityId);
+  },
+
+  hasShowDesktopDragHandles() {
+    const profile = this.profile || {};
+    return profile.showDesktopDragHandles || false;
   },
 
   hasHiddenSystemMessages() {
@@ -466,6 +529,21 @@ Users.mutations({
     else this.addTag(tag);
   },
 
+  setListSortBy(value) {
+    return {
+      $set: {
+        'profile.listSortBy': value,
+      },
+    };
+  },
+  toggleDesktopHandles(value = false) {
+    return {
+      $set: {
+        'profile.showDesktopDragHandles': !value,
+      },
+    };
+  },
+
   toggleSystem(value = false) {
     return {
       $set: {
@@ -534,12 +612,21 @@ Users.mutations({
 Meteor.methods({
   setUsername(username, userId) {
     check(username, String);
+    check(userId, String);
     const nUsersWithUsername = Users.find({ username }).count();
     if (nUsersWithUsername > 0) {
       throw new Meteor.Error('username-already-taken');
     } else {
       Users.update(userId, { $set: { username } });
     }
+  },
+  setListSortBy(value) {
+    check(value, String);
+    Meteor.user().setListSortBy(value);
+  },
+  toggleDesktopDragHandles() {
+    const user = Meteor.user();
+    user.toggleDesktopHandles(user.hasShowDesktopDragHandles());
   },
   toggleSystemMessages() {
     const user = Meteor.user();
@@ -610,8 +697,9 @@ if (Meteor.isServer) {
         board &&
         board.members &&
         _.contains(_.pluck(board.members, 'userId'), inviter._id) &&
-        _.where(board.members, { userId: inviter._id })[0].isActive &&
-        _.where(board.members, { userId: inviter._id })[0].isAdmin;
+        _.where(board.members, { userId: inviter._id })[0].isActive;
+      // GitHub issue 2060
+      //_.where(board.members, { userId: inviter._id })[0].isAdmin;
       if (!allowInvite) throw new Meteor.Error('error-board-notAMember');
 
       this.unblock();
@@ -767,6 +855,9 @@ if (Meteor.isServer) {
 if (Meteor.isServer) {
   // Let mongoDB ensure username unicity
   Meteor.startup(() => {
+    allowedSortValues.forEach(value => {
+      Lists._collection._ensureIndex(value);
+    });
     Users._collection._ensureIndex({ modifiedAt: -1 });
     Users._collection._ensureIndex(
       {

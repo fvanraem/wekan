@@ -11,8 +11,5 @@
       "description": "IMPORTANT! Please replace <App Name> with the value provided on the top. This will be the full URL of your Wekan app.",
       "value": "https://<App Name>.herokuapp.com"
     }
-  },
-  "addons": [
-    "mongolab"
-  ]
+  }
 }
